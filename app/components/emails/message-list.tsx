@@ -1,12 +1,14 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import {Mail, Calendar, RefreshCw, Trash2} from "lucide-react"
+import { useTranslations } from "next-intl"
+import {Mail, Calendar, RefreshCw, Trash2, Share2} from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useThrottle } from "@/hooks/use-throttle"
 import { EMAIL_CONFIG } from "@/config"
 import { useToast } from "@/components/ui/use-toast"
+import { ShareMessageDialog } from "./share-message-dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,9 +22,13 @@ import {
 
 interface Message {
   id: string
-  from_address: string
+  from_address?: string
+  to_address?: string
   subject: string
-  received_at: number
+  received_at?: number
+  sent_at?: number
+  content?: string
+  html?: string
 }
 
 interface MessageListProps {
@@ -30,8 +36,10 @@ interface MessageListProps {
     id: string
     address: string
   }
-  onMessageSelect: (messageId: string | null) => void
+  messageType: 'received' | 'sent'
+  onMessageSelect: (messageId: string | null, messageType?: 'received' | 'sent') => void
   selectedMessageId?: string | null
+  refreshTrigger?: number
 }
 
 interface MessageResponse {
@@ -40,13 +48,16 @@ interface MessageResponse {
   total: number
 }
 
-export function MessageList({ email, onMessageSelect, selectedMessageId }: MessageListProps) {
+export function MessageList({ email, messageType, onMessageSelect, selectedMessageId, refreshTrigger }: MessageListProps) {
+  const t = useTranslations("emails.messages")
+  const tList = useTranslations("emails.list")
+  const tCommon = useTranslations("common.actions")
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
-  const pollTimeoutRef = useRef<Timer>()
+  const pollTimeoutRef = useRef<Timer>(null)
   const messagesRef = useRef<Message[]>([]) // 添加 ref 来追踪最新的消息列表
   const [total, setTotal] = useState(0)
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null)
@@ -60,6 +71,9 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
   const fetchMessages = async (cursor?: string) => {
     try {
       const url = new URL(`/api/emails/${email.id}`, window.location.origin)
+      if (messageType === 'sent') {
+        url.searchParams.set('type', 'sent')
+      }
       if (cursor) {
         url.searchParams.set('cursor', cursor)
       }
@@ -109,7 +123,7 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
   const stopPolling = () => {
     if (pollTimeoutRef.current) {
       clearInterval(pollTimeoutRef.current)
-      pollTimeoutRef.current = undefined
+      pollTimeoutRef.current = null
     }
   }
 
@@ -133,14 +147,14 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
 
   const handleDelete = async (message: Message) => {
     try {
-      const response = await fetch(`/api/emails/${email.id}/${message.id}`, {
+      const response = await fetch(`/api/emails/${email.id}/${message.id}${messageType === 'sent' ? '?type=sent' : ''}`, {
         method: "DELETE"
       })
 
       if (!response.ok) {
         const data = await response.json()
         toast({
-          title: "错误",
+          title: tList("error"),
           description: (data as { error: string }).error,
           variant: "destructive"
         })
@@ -151,8 +165,8 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
       setTotal(prev => prev - 1)
 
       toast({
-        title: "成功",
-        description: "邮件已删除"
+        title: tList("success"),
+        description: tList("deleteSuccess")
       })
 
       if (selectedMessageId === message.id) {
@@ -160,8 +174,8 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
       }
     } catch {
       toast({
-        title: "错误",
-        description: "删除邮件失败",
+        title: tList("error"),
+        description: tList("deleteFailed"),
         variant: "destructive"
       })
     } finally {
@@ -184,6 +198,14 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email.id])
 
+  useEffect(() => {
+    if (refreshTrigger && refreshTrigger > 0) {
+      setRefreshing(true)
+      fetchMessages()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshTrigger])
+
   return (
   <>
     <div className="h-full flex flex-col">
@@ -198,19 +220,19 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
           <RefreshCw className="h-4 w-4" />
         </Button>
         <span className="text-xs text-gray-500">
-          {total > 0 ? `${total} 封邮件` : "暂无邮件"}
+          {total > 0 ? `${total} ${t("messageCount")}` : t("noMessages")}
         </span>
       </div>
 
       <div className="flex-1 overflow-auto" onScroll={handleScroll}>
         {loading ? (
-          <div className="p-4 text-center text-sm text-gray-500">加载中...</div>
+          <div className="p-4 text-center text-sm text-gray-500">{t("loading")}</div>
         ) : messages.length > 0 ? (
           <div className="divide-y divide-primary/10">
             {messages.map(message => (
               <div
                 key={message.id}
-                onClick={() => onMessageSelect(message.id)}
+                onClick={() => onMessageSelect(message.id, messageType)}
                 className={cn(
                   "p-3 hover:bg-primary/5 cursor-pointer group",
                   selectedMessageId === message.id && "bg-primary/10"
@@ -221,36 +243,54 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-sm truncate">{message.subject}</p>
                     <div className="mt-1 flex items-center gap-2 text-xs text-gray-500">
-                      <span className="truncate">{message.from_address}</span>
+                      <span className="truncate">
+                        {message.from_address || message.to_address || ''}
+                      </span>
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3 h-3" />
-                        {new Date(message.received_at).toLocaleString()}
+                        {new Date(message.received_at || message.sent_at || 0).toLocaleString()}
                       </span>
                     </div>
                   </div>
-                  <Button
+                  <div className="opacity-0 group-hover:opacity-100 flex gap-1" onClick={(e) => e.stopPropagation()}>
+                    <ShareMessageDialog
+                      emailId={email.id}
+                      messageId={message.id}
+                      messageSubject={message.subject}
+                      trigger={
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                        >
+                          <Share2 className="h-4 w-4" />
+                        </Button>
+                      }
+                    />
+                    <Button
                       variant="ghost"
                       size="icon"
-                      className="opacity-0 group-hover:opacity-100 h-8 w-8"
+                      className="h-8 w-8"
                       onClick={(e) => {
                         e.stopPropagation()
                         setMessageToDelete(message)
                       }}
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
                 </div>
               </div>
             ))}
             {loadingMore && (
               <div className="text-center text-sm text-gray-500 py-2">
-                加载更多...
+                {t("loadingMore")}
               </div>
             )}
           </div>
         ) : (
           <div className="p-4 text-center text-sm text-gray-500">
-            暂无邮件
+            {t("noMessages")}
           </div>
         )}
       </div>
@@ -258,18 +298,18 @@ export function MessageList({ email, onMessageSelect, selectedMessageId }: Messa
     <AlertDialog open={!!messageToDelete} onOpenChange={() => setMessageToDelete(null)}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>确认删除</AlertDialogTitle>
+          <AlertDialogTitle>{tList("deleteConfirm")}</AlertDialogTitle>
           <AlertDialogDescription>
-            确定要删除邮件 {messageToDelete?.subject} 吗？
+            {tList("deleteDescription", { email: messageToDelete?.subject || "" })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>取消</AlertDialogCancel>
+          <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
           <AlertDialogAction
               className="bg-destructive hover:bg-destructive/90"
               onClick={() => messageToDelete && handleDelete(messageToDelete)}
           >
-            删除
+            {tCommon("delete")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

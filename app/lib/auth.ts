@@ -8,8 +8,10 @@ import { getRequestContext } from "@cloudflare/next-on-pages"
 import { Permission, hasPermission, ROLES, Role } from "./permissions"
 import CredentialsProvider from "next-auth/providers/credentials"
 import { hashPassword, comparePassword } from "@/lib/utils"
-import { authSchema } from "@/lib/validation"
+import { authSchema, AuthSchema } from "@/lib/validation"
 import { generateAvatarUrl } from "./avatar"
+import { getUserId } from "./apiKey"
+import { verifyTurnstileToken } from "./turnstile"
 
 const ROLE_DESCRIPTIONS: Record<Role, string> = {
   [ROLES.EMPEROR]: "皇帝（网站所有者）",
@@ -20,7 +22,16 @@ const ROLE_DESCRIPTIONS: Record<Role, string> = {
 
 const getDefaultRole = async (): Promise<Role> => {
   const defaultRole = await getRequestContext().env.SITE_CONFIG.get("DEFAULT_ROLE")
-  return defaultRole === ROLES.KNIGHT ? ROLES.KNIGHT : ROLES.CIVILIAN
+
+  if (
+    defaultRole === ROLES.DUKE ||
+    defaultRole === ROLES.KNIGHT ||
+    defaultRole === ROLES.CIVILIAN
+  ) {
+    return defaultRole as Role
+  }
+  
+  return ROLES.CIVILIAN
 }
 
 async function findOrCreateRole(db: Db, roleName: Role) {
@@ -62,12 +73,13 @@ export async function getUserRole(userId: string) {
 }
 
 export async function checkPermission(permission: Permission) {
-  const session = await auth()
-  if (!session?.user?.id) return false
+  const userId = await getUserId()
+
+  if (!userId) return false
 
   const db = createDb()
   const userRoleRecords = await db.query.userRoles.findMany({
-    where: eq(userRoles.userId, session.user.id),
+    where: eq(userRoles.userId, userId),
     with: { role: true },
   })
 
@@ -102,26 +114,35 @@ export const {
           throw new Error("请输入用户名和密码")
         }
 
-        const { username, password } = credentials
+        const { username, password, turnstileToken } = credentials as Record<string, string | undefined>
 
+        let parsedCredentials: AuthSchema
         try {
-          authSchema.parse({ username, password })
+          parsedCredentials = authSchema.parse({ username, password, turnstileToken })
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         } catch (error) {
           throw new Error("输入格式不正确")
         }
 
+        const verification = await verifyTurnstileToken(parsedCredentials.turnstileToken)
+        if (!verification.success) {
+          if (verification.reason === "missing-token") {
+            throw new Error("请先完成安全验证")
+          }
+          throw new Error("安全验证未通过")
+        }
+
         const db = createDb()
 
         const user = await db.query.users.findFirst({
-          where: eq(users.username, username as string),
+          where: eq(users.username, parsedCredentials.username),
         })
 
         if (!user) {
           throw new Error("用户名或密码错误")
         }
 
-        const isValid = await comparePassword(password as string, user.password as string)
+        const isValid = await comparePassword(parsedCredentials.password, user.password as string)
         if (!isValid) {
           throw new Error("用户名或密码错误")
         }

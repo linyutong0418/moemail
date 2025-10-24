@@ -25,7 +25,7 @@ async function getUserByApiKey(key: string): Promise<User | null> {
 }
 
 export async function handleApiKeyAuth(apiKey: string, pathname: string) {
-  if (!pathname.startsWith('/api/emails')) {
+  if (!pathname.startsWith('/api/emails') && !pathname.startsWith('/api/config')) {
     return NextResponse.json(
       { error: "无权限查看" },
       { status: 403 }
@@ -40,8 +40,14 @@ export async function handleApiKeyAuth(apiKey: string, pathname: string) {
     )
   }
 
-  const response = NextResponse.next()
-  response.headers.set("X-User-Id", user.id)
+  const requestHeaders = new Headers(await headers())
+  requestHeaders.set("X-User-Id", user.id)
+  
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders
+    }
+  })
   return response
 }
 
